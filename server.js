@@ -416,21 +416,19 @@ app.patch('/api/staff/menu/:id',auth,role('staff'),async(req,res)=>{
     const d=await db();
     const id=Number(req.params.id);
     if(!Number.isInteger(id)) return res.status(400).json({error:'Invalid menu item'});
-    const row=(await d.query('SELECT * FROM menu_items WHERE id=$1',[id])).rows[0];
-    if(!row) return res.status(404).json({error:'Menu item not found'});
-    const canonicalShop=id>=100&&id<200?'Hari Sandwich':id>=200&&id<300?'Reo Store':id>=300&&id<400?'Campus Café':null;
-    const sameShop=canonicalShop && (
-      row.shop===req.user.shop ||
-      row.shop.replace('é','e').toLowerCase()===String(req.user.shop).replace('é','e').toLowerCase()
-    );
-    if(!sameShop || canonicalShop!==req.user.shop) return res.status(403).json({error:'You cannot change another shop\'s menu'});
+    if(!shops.includes(String(req.user.shop||''))) return res.status(403).json({error:'Invalid staff shop'});
+    if(typeof req.body?.available!=='boolean') return res.status(400).json({error:'Availability must be true or false'});
     const out=(await d.query(
-      'UPDATE menu_items SET available=$1 WHERE id=$2 RETURNING id,shop,name,available',
-      [!!req.body.available,row.id]
+      `UPDATE menu_items
+       SET available=$1
+       WHERE id=$2 AND shop=$3
+       RETURNING id,shop,name,available`,
+      [req.body.available,id,req.user.shop]
     )).rows[0];
+    if(!out) return res.status(403).json({error:'You cannot change another shop\'s menu'});
     res.json({item:out});
   }catch(e){
-    console.error(e);
+    console.error('Availability update failed:',e);
     res.status(500).json({error:'Availability update failed'});
   }
 });
