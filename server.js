@@ -29,54 +29,24 @@ const customerProfileRoles = {
 
 async function db(){ if(!pool) throw new Error('DATABASE_URL is not configured'); return pool; }
 async function init(){
-  if(!pool) return;
-  // Ensure the complete database schema exists before running migrations/seeding.
-  // This is important for fresh Render/Supabase databases where menu_items and
-  // the other tables do not exist yet.
+  if(!pool) throw new Error('DATABASE_URL is not configured');
+
+  // Core schema must succeed before the app is considered database-ready.
   await pool.query(schema);
-  // Backward-compatible migration: older orders used the creation day implicitly.
+
+  // Backward-compatible core migrations. Keep these separate so one optional
+  // legacy migration cannot prevent demo accounts from being seeded.
   await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS pickup_date DATE`);
   await pool.query(`UPDATE orders SET pickup_date=(created_at AT TIME ZONE 'Asia/Kolkata')::date WHERE pickup_date IS NULL`);
   await pool.query(`ALTER TABLE orders ALTER COLUMN pickup_date SET DEFAULT CURRENT_DATE`);
   await pool.query(`ALTER TABLE orders ALTER COLUMN pickup_date SET NOT NULL`);
-  // Backward-compatible inventory migration for existing databases.
   await pool.query(`ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS stock INTEGER`);
-  // Wallet transaction metadata migration: link order debits to the actual order.
   await pool.query(`ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES orders(id) ON DELETE SET NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS wallet_tx_order_idx ON wallet_transactions(order_id)`);
-  // Enrich legacy order debits so existing wallet history also shows the food and shop.
-  await pool.query(`
-    WITH legacy_matches AS (
-      SELECT wt2.id AS wallet_tx_id,
-             o.id AS order_id,
-             CASE WHEN jsonb_array_length(o.items)>1
-                  THEN COALESCE(o.items->0->>'name','CampusBite order') || ' + ' || (jsonb_array_length(o.items)-1)::text || ' more'
-                  ELSE COALESCE(o.items->0->>'name','CampusBite order') || CASE WHEN COALESCE((o.items->0->>'q')::int,1)>1 THEN ' × ' || (o.items->0->>'q') ELSE '' END
-             END AS food_title,
-             o.shop || ' • ' || o.public_id AS shop_sub,
-             ROW_NUMBER() OVER (
-               PARTITION BY wt2.id
-               ORDER BY ABS(EXTRACT(EPOCH FROM (o.created_at-wt2.created_at))) ASC
-             ) AS match_rank
-      FROM wallet_transactions wt2
-      JOIN orders o
-        ON o.customer_id=wt2.customer_id
-       AND ABS(EXTRACT(EPOCH FROM (o.created_at-wt2.created_at))) <= 120
-       AND ABS(o.total-wt2.amount) < 0.01
-      WHERE wt2.type='debit'
-        AND wt2.title='CampusBite order'
-        AND wt2.order_id IS NULL
-    )
-    UPDATE wallet_transactions AS wt
-    SET order_id = m.order_id,
-        title = m.food_title,
-        sub = m.shop_sub
-    FROM legacy_matches AS m
-    WHERE m.match_rank=1
-      AND wt.id=m.wallet_tx_id
-  `);
-  // Fictional demo customer accounts only. Any legacy/non-demo accounts are
-  // removed so real institutional credentials cannot remain in the prototype.
+
+  // Seed demo accounts before optional legacy-data enrichment. This guarantees
+  // a fresh Render database gets usable login accounts even if old wallet data
+  // contains an unexpected row shape.
   await pool.query(`DELETE FROM customers WHERE customer_code NOT LIKE 'CB%'`);
   const customers=[
     ['CB2026001','Aarav Sharma','','Campus@123'],
@@ -115,7 +85,44 @@ async function init(){
     await pool.query(`UPDATE menu_items SET stock=$1 WHERE id=$2 AND stock IS NULL`,[stock,id]);
   }
 
+  // Optional legacy wallet-history enrichment. Failure here should not take
+  // the application offline or block login/normal ordering.
+  try {
+    await pool.query(`
+      WITH legacy_matches AS (
+        SELECT wt2.id AS wallet_tx_id,
+               o.id AS order_id,
+               CASE WHEN jsonb_array_length(o.items)>1
+                    THEN COALESCE(o.items->0->>'name','CampusBite order') || ' + ' || (jsonb_array_length(o.items)-1)::text || ' more'
+                    ELSE COALESCE(o.items->0->>'name','CampusBite order') || CASE WHEN COALESCE((o.items->0->>'q')::int,1)>1 THEN ' × ' || (o.items->0->>'q') ELSE '' END
+               END AS food_title,
+               o.shop || ' • ' || o.public_id AS shop_sub,
+               ROW_NUMBER() OVER (
+                 PARTITION BY wt2.id
+                 ORDER BY ABS(EXTRACT(EPOCH FROM (o.created_at-wt2.created_at))) ASC
+               ) AS match_rank
+        FROM wallet_transactions wt2
+        JOIN orders o
+          ON o.customer_id=wt2.customer_id
+         AND ABS(EXTRACT(EPOCH FROM (o.created_at-wt2.created_at))) <= 120
+         AND ABS(o.total-wt2.amount) < 0.01
+        WHERE wt2.type='debit'
+          AND wt2.title='CampusBite order'
+          AND wt2.order_id IS NULL
+      )
+      UPDATE wallet_transactions AS wt
+      SET order_id = m.order_id,
+          title = m.food_title,
+          sub = m.shop_sub
+      FROM legacy_matches AS m
+      WHERE m.match_rank=1
+        AND wt.id=m.wallet_tx_id
+    `);
+  } catch(e) {
+    console.warn('Legacy wallet-history enrichment skipped:', e.message);
+  }
 }
+
 function tokenFor(payload){return jwt.sign(payload,JWT_SECRET,{expiresIn:'12h'});}
 function auth(req,res,next){
   try{

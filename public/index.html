@@ -164,6 +164,10 @@ button,input,select{font:inherit}button{cursor:pointer}
 .single-logout:hover{background:#f7f8f7;border-color:#cfd4d0;color:#303633}
 </style>
 
+<style id="cart-header-clean-css">
+#cartHead{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-width:64px}
+#cartHead b{font-weight:900}
+</style>
 <style id="header-cleanup-css">
 /* Keep demo/reset/cart controls grouped on the right and move the
    customer initials avatar beside Logout. */
@@ -461,7 +465,7 @@ body.staff-mode .staff-only-label{display:inline-flex;align-items:center}
 <div class="app">
 <header class="header">
  <div class="brand"><div class="logoMark">🥫</div><div><div class="logo">Campus<span>Bite</span></div><div class="tag">SMART CAMPUS CANTEEN</div></div></div>
- <div class="headActions"><button class="single-logout" id="logoutBtn">Log out</button><span class="staff-only-label">👨‍🍳 STAFF CONSOLE</span><button class="headBtn" id="walletHead">₹<span id="headBalance">1,250</span></button><button class="headBtn" id="cartHead"><b id="cartCount">0</b></button><div class="avatar" id="headerAvatar">ST</div></div>
+ <div class="headActions"><button class="single-logout" id="logoutBtn">Log out</button><span class="staff-only-label">👨‍🍳 STAFF CONSOLE</span><button class="headBtn" id="walletHead">₹<span id="headBalance">1,250</span></button><button class="headBtn cartHeadBtn" id="cartHead" aria-label="Cart">🛒 <b id="cartCount">0</b></button><div class="avatar" id="headerAvatar">ST</div></div>
 </header>
 <div class="layout">
 <aside class="side">
@@ -503,12 +507,13 @@ body.staff-mode .staff-only-label{display:inline-flex;align-items:center}
 </div>
 <div id="firstOrderOffer" style="display:none"><div class="section"><h2>Customer offer</h2><span class="muted">Applied automatically</span></div>
  <div class="offer"><div><b>10% off your first CampusBite order</b><small>Code <b>CAMPUS10</b> • minimum order ₹100</small></div><button class="coupon" id="applyOffer">Apply</button></div></div>
+ <div id="homePopularChoices" class="smartRecommendations" style="display:none"></div>
 </section>
 
 <section id="menu" class="view">
  <div class="section"><div><h2>Today’s canteen menu</h2></div><span class="muted">Block 4 Canteen • Open</span></div>
  <div class="searchbar"><input id="search" placeholder="Search the menu…"><select id="sort"><option value="popular">Popular first</option><option value="low">Lowest price</option><option value="high">Highest price</option></select></div>
- <div id="chips" class="chips"></div><div id="smartRecommendations" class="smartRecommendations" style="display:none"></div><div id="menuGrid" class="menuGrid"></div>
+ <div id="chips" class="chips"></div><div id="menuGrid" class="menuGrid"></div>
 </section>
 
 <section id="cart" class="view">
@@ -743,37 +748,25 @@ async function loadCanteenStatus(){
 
 function renderHome(){
   const shop=Object.values(SHOP_MAP).includes(selectedShop)?selectedShop:"Reo Store";
-  const shopItems=MENU.filter(x=>x.shop===shop&&x.available);
   const wait=$("queueWait");
   const status=CANTEEN_STATUS[shop];
   if(wait)wait.textContent=status?(status.waitMinutes===0?"No wait":status.waitMinutes+" min") : "Checking…";
+  renderHomePopularChoices(shop);
 }
-function renderSmartRecommendations(shop, pool){
- const box=$("smartRecommendations"); if(!box)return;
- const history=orders.filter(o=>o.shop===shop&&Array.isArray(o.items));
- const counts=new Map(), pairCounts=new Map(), cartIds=new Set(Object.keys(cart).map(Number));
- history.forEach(o=>{
-   const ids=[...new Set(o.items.map(i=>Number(i.id||i.menuItemId)).filter(Number.isFinite))];
-   ids.forEach(id=>counts.set(id,(counts.get(id)||0)+1));
-   if(cartIds.size && ids.some(id=>cartIds.has(id))) ids.filter(id=>!cartIds.has(id)).forEach(id=>pairCounts.set(id,(pairCounts.get(id)||0)+1));
- });
- const candidates=pool.filter(x=>!cartIds.has(Number(x.id)));
- const scored=candidates.map(x=>{const id=Number(x.id),freq=counts.get(id)||0,pair=pairCounts.get(id)||0;return{x,score:pair*100+freq*10+Number(x.pop||0)*.01+(freq===0?1:0),pair,freq};}).sort((a,b)=>b.score-a.score);
- const picks=scored.slice(0,3);
+function renderHomePopularChoices(shop){
+ const box=$("homePopularChoices"); if(!box)return;
+ const picks=MENU.filter(x=>x.shop===shop&&x.available).sort((a,b)=>Number(b.pop||0)-Number(a.pop||0)).slice(0,3);
  if(!picks.length){box.style.display='none';box.innerHTML='';return;}
- const hasHistory=history.length>0,hasCartPair=picks.some(p=>p.pair>0);
- const heading=hasCartPair?'Goes well with your order':(hasHistory?'Recommended for you':'Popular choices');
- const sub=hasCartPair?'Based on what students often order together':(hasHistory?'Based on your orders and this shop':'Popular choices to get you started');
  box.style.display='';
- box.innerHTML=`<div class="smartRecHead"><div><h3>${heading}</h3><span>${sub}</span></div></div><div class="smartRecGrid">${picks.map(({x,pair,freq})=>`<div class="smartRecCard"><div class="smartRecPic"><img src="${x.img}" alt="${x.name}" loading="lazy" onerror="this.style.display='none';this.parentElement.textContent='${x.emoji}'"></div><div class="smartRecBody"><b>${x.name}</b><small>${pair>0?'Often ordered with your selection':freq>0?'You have ordered this before':'Popular with students'}</small><div class="smartRecPrice">₹${x.price}</div></div><button class="smartRecAdd" data-smart-add="${x.id}">+ Add</button></div>`).join('')}</div>`;
- box.querySelectorAll('[data-smart-add]').forEach(btn=>btn.onclick=()=>{const x=MENU.find(m=>m.id===Number(btn.dataset.smartAdd));if(!x)return;const next=(cart[x.id]||0)+1;if(x.stock!=null&&next>Number(x.stock)){toast('Item is currently unavailable');return;}cart[x.id]=next;renderMenu();renderCart();toast(x.name+' added to cart');});
+ box.innerHTML=`<div class="smartRecHead"><div><h3>Popular choices</h3><span>Top picks at ${shop}</span></div><button class="secondary" type="button" id="homePopularBrowse" style="font-size:9px;padding:7px 10px">View menu →</button></div><div class="smartRecGrid">${picks.map(x=>{const q=cart[x.id]||0;const control=q?`<div class="qty"><button type="button" data-home-pop-id="${x.id}" data-home-pop-d="-1">−</button><b>${q}</b><button type="button" data-home-pop-id="${x.id}" data-home-pop-d="1">+</button></div>`:`<button class="smartRecAdd" type="button" data-home-pop-id="${x.id}" data-home-pop-d="1">+ Add</button>`;return `<div class="smartRecCard"><div class="smartRecPic"><img src="${x.img}" alt="${x.name}" loading="lazy" onerror="this.style.display='none';this.parentElement.textContent='${x.emoji}'"></div><div class="smartRecBody"><b>${x.name}</b><small>Popular choice at this shop</small><div class="smartRecPrice">₹${x.price}</div></div>${control}</div>`;}).join('')}</div>`;
+ box.querySelector('#homePopularBrowse').onclick=()=>view('menu');
+ box.querySelectorAll('[data-home-pop-id]').forEach(btn=>btn.onclick=()=>{const x=MENU.find(m=>m.id===Number(btn.dataset.homePopId));if(!x)return;const d=Number(btn.dataset.homePopD);const next=Math.max(0,(cart[x.id]||0)+d);if(d>0&&x.stock!=null&&next>Number(x.stock)){toast('Item is currently unavailable');return;}if(next===0)delete cart[x.id];else cart[x.id]=next;render();if(d>0)toast(x.name+' added to cart');});
 }
 
 function renderMenu(){
  const shop=Object.values(SHOP_MAP).includes(selectedShop)?selectedShop:"Reo Store";
  const q=$("search").value.toLowerCase(),sort=$("sort").value;
  let a=MENU.filter(x=>x.shop===shop&&x.available&&(!q||x.name.toLowerCase().includes(q)));
- const recommendationPool=MENU.filter(x=>x.shop===shop&&x.available);
  a.sort((x,y)=>sort==="low"?x.price-y.price:sort==="high"?y.price-x.price:y.pop-x.pop);
  const cats=["All",...new Set(a.map(x=>x.cat))];
  if(category!=="All"&&!cats.includes(category))category="All";
@@ -781,7 +774,6 @@ function renderMenu(){
  $("chips").innerHTML=cats.map(c=>`<button class="chip ${c===category?"active":""}" data-cat="${c}">${c}</button>`).join("");
  $("menuGrid").innerHTML=a.length?a.map(foodCard).join(""):`<div class="empty">No items available at this shop.</div>`;
  document.querySelectorAll("[data-cat]").forEach(btn=>btn.onclick=()=>{category=btn.dataset.cat;renderMenu()});
- renderSmartRecommendations(shop,recommendationPool);
  const label=$("selectedShopMenu");if(label)label.textContent=shop;
  document.querySelectorAll("#shopMenuFilter [data-shop]").forEach(btn=>btn.classList.toggle("active",btn.dataset.shop===shop));
 }
