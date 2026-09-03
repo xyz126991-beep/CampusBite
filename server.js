@@ -46,25 +46,34 @@ async function init(){
   await pool.query(`CREATE INDEX IF NOT EXISTS wallet_tx_order_idx ON wallet_transactions(order_id)`);
   // Enrich legacy order debits so existing wallet history also shows the food and shop.
   await pool.query(`
-    UPDATE wallet_transactions wt
-    SET order_id = m.order_id,
-        title = m.food_title,
-        sub = m.shop_sub
-    FROM LATERAL (
-      SELECT o.id AS order_id,
+    WITH legacy_matches AS (
+      SELECT wt2.id AS wallet_tx_id,
+             o.id AS order_id,
              CASE WHEN jsonb_array_length(o.items)>1
                   THEN COALESCE(o.items->0->>'name','CampusBite order') || ' + ' || (jsonb_array_length(o.items)-1)::text || ' more'
                   ELSE COALESCE(o.items->0->>'name','CampusBite order') || CASE WHEN COALESCE((o.items->0->>'q')::int,1)>1 THEN ' × ' || (o.items->0->>'q') ELSE '' END
              END AS food_title,
-             o.shop || ' • ' || o.public_id AS shop_sub
-      FROM orders o
-      WHERE o.customer_id=wt.customer_id
-        AND ABS(EXTRACT(EPOCH FROM (o.created_at-wt.created_at))) <= 120
-        AND ABS(o.total-wt.amount) < 0.01
-      ORDER BY ABS(EXTRACT(EPOCH FROM (o.created_at-wt.created_at))) ASC
-      LIMIT 1
-    ) m
-    WHERE wt.type='debit' AND wt.title='CampusBite order' AND wt.order_id IS NULL
+             o.shop || ' • ' || o.public_id AS shop_sub,
+             ROW_NUMBER() OVER (
+               PARTITION BY wt2.id
+               ORDER BY ABS(EXTRACT(EPOCH FROM (o.created_at-wt2.created_at))) ASC
+             ) AS match_rank
+      FROM wallet_transactions wt2
+      JOIN orders o
+        ON o.customer_id=wt2.customer_id
+       AND ABS(EXTRACT(EPOCH FROM (o.created_at-wt2.created_at))) <= 120
+       AND ABS(o.total-wt2.amount) < 0.01
+      WHERE wt2.type='debit'
+        AND wt2.title='CampusBite order'
+        AND wt2.order_id IS NULL
+    )
+    UPDATE wallet_transactions AS wt
+    SET order_id = m.order_id,
+        title = m.food_title,
+        sub = m.shop_sub
+    FROM legacy_matches AS m
+    WHERE m.match_rank=1
+      AND wt.id=m.wallet_tx_id
   `);
   // Fictional demo customer accounts only. Any legacy/non-demo accounts are
   // removed so real institutional credentials cannot remain in the prototype.
@@ -126,6 +135,11 @@ app.get('/api/health',(req,res)=>{
     database:dbReady?'ready':'initializing',
     time:new Date().toISOString()
   });
+});
+app.use('/api', (req,res,next)=>{
+  if(req.path==='/health') return next();
+  if(!dbReady) return res.status(503).json({error:'CampusBite database is still starting. Please try again in a few seconds.'});
+  next();
 });
 app.post('/api/auth/customer',async(req,res)=>{
   try{const {customerCode,password,profileRole}=req.body; const r=(await (await db()).query('SELECT * FROM customers WHERE customer_code=$1',[String(customerCode||'').trim()])).rows[0];
@@ -430,11 +444,33 @@ app.get('/{*splat}',(req,res)=>res.sendFile(path.join(__dirname,'public','index.
 
 // Start HTTP immediately so Render can reach the service even while PostgreSQL
 // is waking up or the first-time schema initialization is running.
+async function initializeDatabaseWithRetry(){
+  const maxAttempts = 6;
+  for(let attempt=1; attempt<=maxAttempts; attempt++){
+    try{
+      await init();
+      dbReady=true;
+      console.log('CampusBite database initialization complete');
+      return;
+    }catch(e){
+      dbReady=false;
+      console.error(`CampusBite database initialization attempt ${attempt}/${maxAttempts} failed:`,e);
+      if(attempt<maxAttempts){
+        const delayMs = Math.min(3000 * attempt, 12000);
+        console.log(`Retrying database initialization in ${delayMs}ms...`);
+        await new Promise(resolve=>setTimeout(resolve,delayMs));
+      }
+    }
+  }
+  console.error('CampusBite database initialization failed after all retries.');
+}
+
+// Start HTTP immediately so Render can reach the service while PostgreSQL wakes up.
+// Database initialization retries automatically, preventing a transient database
+// wake-up from leaving demo accounts unseeded and the login permanently broken.
 const server = app.listen(PORT,'0.0.0.0',()=>{
   console.log(`CampusBite listening on ${PORT}`);
-  init()
-    .then(()=>{ dbReady=true; console.log('CampusBite database initialization complete'); })
-    .catch(e=>console.error('CampusBite database initialization failed:',e));
+  initializeDatabaseWithRetry();
 });
 
 process.on('SIGTERM',()=>server.close(()=>process.exit(0)));
