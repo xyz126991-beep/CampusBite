@@ -1251,10 +1251,21 @@ window.addEventListener("load",()=>{
   async function api(path,opts={}){
     const headers=Object.assign({"Content-Type":"application/json"},opts.headers||{});
     if(token()) headers.Authorization="Bearer "+token();
-    const r=await fetch(API+path,Object.assign({},opts,{headers}));
-    let data={}; try{data=await r.json()}catch(e){}
-    if(!r.ok) throw new Error(data.error||("Request failed ("+r.status+")"));
-    return data;
+    let lastError=null;
+    for(let attempt=0;attempt<3;attempt++){
+      try{
+        const r=await fetch(API+path,Object.assign({},opts,{headers}));
+        let data={}; try{data=await r.json()}catch(e){}
+        if(r.ok)return data;
+        lastError=new Error(data.error||("Request failed ("+r.status+")"));
+        if(![502,503,504].includes(r.status)||attempt===2)throw lastError;
+      }catch(e){
+        lastError=e;
+        if(attempt===2)throw e;
+      }
+      await new Promise(resolve=>setTimeout(resolve,800*(attempt+1)));
+    }
+    throw lastError||new Error("Request failed");
   }
   function setSession(session){
     localStorage.setItem("campusBiteRoleSession",JSON.stringify(session));
@@ -1280,7 +1291,13 @@ window.addEventListener("load",()=>{
     if(!token()||user()?.role!=="customer"||syncing)return;
     syncing=true;
     try{const st=await api('/api/customer/state');hydrateState(st);}
-    catch(e){if(!silent)toast(e.message||"Could not load account data");}
+    catch(e){
+      if(!silent){
+        const msg=String(e?.message||'');
+        if(/502|503|504|starting|unavailable/i.test(msg)) toast('CampusBite is still connecting. Please wait a moment.');
+        else toast(msg||"Could not load account data");
+      }
+    }
     finally{syncing=false;}
   }
   async function loadMenu(){

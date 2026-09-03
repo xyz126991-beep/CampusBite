@@ -13,7 +13,10 @@ const PORT = process.env.PORT || 10000;
 const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-campusbite-secret';
 if (!DATABASE_URL) console.warn('DATABASE_URL is not set. The server cannot use PostgreSQL until it is configured.');
-const pool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false }) : null;
+const pool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false, max: 10, idleTimeoutMillis: 30000, connectionTimeoutMillis: 10000, keepAlive: true }) : null;
+if(pool){
+  pool.on('error',(err)=>{ console.error('PostgreSQL pool error:',err); });
+}
 const app = express();
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '1mb' }));
@@ -444,6 +447,13 @@ app.get('/api/staff/orders',auth,role('staff'),async(req,res)=>{try{const d=awai
 app.get('/api/staff/ratings',auth,role('staff'),async(req,res)=>{try{const d=await db();const summary=(await d.query(`SELECT COUNT(*)::int AS count, COALESCE(ROUND(AVG(rating)::numeric,1),0) AS average FROM order_ratings WHERE shop=$1`,[req.user.shop])).rows[0];const rows=(await d.query(`SELECT r.rating,r.created_at,o.public_id,c.name AS customer_name FROM order_ratings r JOIN orders o ON o.id=r.order_id JOIN customers c ON c.id=r.customer_id WHERE r.shop=$1 ORDER BY r.created_at DESC LIMIT 12`,[req.user.shop])).rows;res.json({average:Number(summary.average||0),count:Number(summary.count||0),ratings:rows.map(r=>({rating:Number(r.rating),createdAt:new Date(r.created_at).getTime(),orderId:r.public_id,customerName:r.customer_name||'Student'}))});}catch(e){console.error(e);res.status(500).json({error:'Ratings unavailable'});}});
 app.patch('/api/staff/orders/:id/status',auth,role('staff'),async(req,res)=>{try{const d=await db();const row=(await d.query('SELECT * FROM orders WHERE public_id=$1 AND shop=$2',[req.params.id,req.user.shop])).rows[0];if(!row)return res.status(404).json({error:'Order not found'});if(Number(row.status)>=3)return res.status(400).json({error:'Order is already completed'});const next=Number(row.status)+1;if(next!==Number(req.body.status))return res.status(400).json({error:'Invalid next status'});let sql='UPDATE orders SET status=$1';const vals=[next,row.id];if(next===1)sql+=', prep_started_at=COALESCE(prep_started_at,NOW())';if(next===2)sql+=', ready_at=COALESCE(ready_at,NOW())';if(next===3)sql+=', completed_at=COALESCE(completed_at,NOW())';sql+=' WHERE id=$2 RETURNING *';const out=(await d.query(sql,vals)).rows[0];res.json({order:serializeOrder(out)});}catch(e){console.error(e);res.status(500).json({error:'Status update failed'});}});
 app.get('/api/staff/summary',auth,role('staff'),async(req,res)=>{try{const d=await db();const day=req.query.date||new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());const rows=(await d.query(`SELECT * FROM orders WHERE shop=$1 AND (created_at AT TIME ZONE 'Asia/Kolkata')::date = $2::date`,[req.user.shop,day])).rows;const revenue=rows.reduce((a,r)=>a+Number(r.total),0);const active=rows.filter(r=>r.status<3).length;res.json({date:day,orders:rows.length,revenue,active});}catch(e){console.error(e);res.status(500).json({error:'Summary unavailable'});}});
+
+app.use((err,req,res,next)=>{
+  console.error('Unhandled API error:',err);
+  if(res.headersSent)return next(err);
+  if(req.path.startsWith('/api/')) return res.status(500).json({error:'CampusBite service temporarily unavailable. Please retry.'});
+  res.status(500).send('CampusBite service temporarily unavailable.');
+});
 
 app.get('/{*splat}',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 
